@@ -1,5 +1,4 @@
 import {DataAPIClient} from '@datastax/astra-db-ts';
-
 import { PlaywrightWebBaseLoader } from "@langchain/community/document_loaders/web/playwright";
 import { HfInference } from "@huggingface/inference";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
@@ -24,7 +23,7 @@ async function retryOp<T>(op: () => Promise<T>, attempts = 3, initialDelay = 100
   while (true) {
     try {
       return await op();
-    } catch (err: unknown) {
+    } catch (err: unknown) -{
       const msg = getErrMsg(err);
       if (attempt >= attempts) {
         throw err;
