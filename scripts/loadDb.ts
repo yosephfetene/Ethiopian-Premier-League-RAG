@@ -1,11 +1,16 @@
 // scripts/loadDb.ts
 import { DataAPIClient } from "@datastax/astra-db-ts";
 import { PlaywrightWebBaseLoader } from "@langchain/community/document_loaders/web/playwright";
-import { HfInference } from "@huggingface/inference";
+import { HfInference, FeatureExtractionOutput } from "@huggingface/inference";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import "dotenv/config";
 
 type SimilarityMetric = "dot_product" | "cosine" | "euclidean";
+
+interface AstraDocument {
+  content: string;
+  vector: number[];
+}
 
 const {
   ASTRA_DB_NAMESPACE,
@@ -41,9 +46,9 @@ const MAX_CHUNKS_PER_PAGE = Number(process.env.SEED_MAX_CHUNKS_PER_PAGE ?? 20);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const getErrMsg = (e: unknown) => {
-  if (e && typeof e === "object" && "message" in e && typeof (e as any).message === "string") {
-    return (e as any).message;
+const getErrMsg = (e: unknown): string => {
+  if (e && typeof e === "object" && "message" in e && typeof e.message === "string") {
+    return e.message;
   }
   return String(e);
 };
@@ -71,7 +76,7 @@ const createCollection = async (similarityMetric: SimilarityMetric = "dot_produc
   const perRequestTimeout = 120000;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const res = await db.createCollection(ASTRA_DB_COLLECTION as string, {
+      const res = await db.createCollection(ASTRA_DB_COLLECTION, {
         vector: {
           dimension: 1536,
           metric: similarityMetric,
@@ -95,7 +100,7 @@ const createCollection = async (similarityMetric: SimilarityMetric = "dot_produc
   }
 };
 
-const scrapePage = async (url: string) => {
+const scrapePage = async (url: string): Promise<string> => {
   const loader = new PlaywrightWebBaseLoader(url, {
     launchOptions: { headless: true },
     gotoOptions: { waitUntil: "domcontentloaded" },
@@ -106,12 +111,34 @@ const scrapePage = async (url: string) => {
     },
   });
 
-  const scraped = await loader.scrape(); // returns string
+  const scraped = await loader.scrape();
   return (scraped ?? "").replace(/<[^>]*>?/gm, "|");
 };
 
-const loadSampleData = async () => {
-  const collection = await db.collection(ASTRA_DB_COLLECTION as string);
+const extractVectorFromResponse = (response: FeatureExtractionOutput): number[] => {
+  if (Array.isArray(response)) {
+    // Handle array response
+    if (Array.isArray(response[0])) {
+      return response[0] as number[];
+    }
+    return response as number[];
+  }
+  
+  // Handle object response with data property
+  if (response && typeof response === 'object' && 'data' in response) {
+    const data = (response as any).data;
+    if (Array.isArray(data) && Array.isArray(data[0])) {
+      return data[0] as number[];
+    }
+    return data as number[];
+  }
+  
+  // Fallback: try to cast as number array
+  return response as unknown as number[];
+};
+
+const loadSampleData = async (): Promise<void> => {
+  const collection = await db.collection<AstraDocument>(ASTRA_DB_COLLECTION);
   let pagesProcessed = 0;
   let totalInserted = 0;
 
@@ -135,16 +162,7 @@ const loadSampleData = async () => {
         2000
       );
 
-      // featureExtraction may return array or nested shape; try to normalize to 1D array
-      let vector: number[] = [];
-      if (Array.isArray(response)) {
-        // if response[0] is array of floats:
-        vector = Array.isArray(response[0]) ? (response[0] as number[]) : (response as unknown as number[]);
-      } else if ((response as any).data) {
-        vector = (response as any).data[0];
-      } else {
-        vector = response as unknown as number[];
-      }
+      const vector = extractVectorFromResponse(response);
 
       const VECTOR_DIM = 1536;
       const safeVector =
@@ -173,11 +191,11 @@ const loadSampleData = async () => {
   console.log(`Seeding complete. Pages processed: ${pagesProcessed}, documents inserted: ${totalInserted}`);
 };
 
-(async () => {
+(async (): Promise<void> => {
   try {
     await createCollection();
   } catch (err: unknown) {
-    if ((err as any)?.name === "CollectionAlreadyExistsError") {
+    if (err && typeof err === 'object' && 'name' in err && err.name === "CollectionAlreadyExistsError") {
       console.log("Collection already exists, continuing to load data...");
     } else {
       console.error("createCollection failed:", err);

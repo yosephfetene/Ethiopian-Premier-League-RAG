@@ -48,25 +48,36 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      // TODO: replace '/api/chat' with your route path if different
-      const res = await fetch("/api/route", {
+      console.log("Sending request to API...");
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [...messages, userMsg] }),
       });
+
+      console.log("Response status:", res.status);
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || `HTTP error! status: ${res.status}`);
+      }
+
       const data = await res.json();
+      console.log("Response data:", data);
 
       const assistantMsg: Message = {
         id: crypto.randomUUID(),
-        content: data.answer ?? "Sorry, no answer returned.",
+        content: data.answer ?? "Sorry, I couldn't generate a response.",
         role: "assistant",
       };
       append(assistantMsg);
     } catch (err) {
-      console.error("Chat error", err);
+      console.error("Chat error details:", err);
+      const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
+      
       append({
         id: crypto.randomUUID(),
-        content: "There was an error getting a response. Check console.",
+        content: `Error: ${errorMessage}. Please check the console for details.`,
         role: "assistant",
       });
     } finally {
@@ -111,8 +122,13 @@ export default function Home() {
           value={input}
           placeholder="Ask me something?"
           aria-label="Ask a question"
+          disabled={isLoading}
         />
-        <input type="submit" />
+        <input 
+          type="submit" 
+          value={isLoading ? "Sending..." : "Send"}
+          disabled={isLoading || !input.trim()}
+        />
       </form>
     </main>
   );

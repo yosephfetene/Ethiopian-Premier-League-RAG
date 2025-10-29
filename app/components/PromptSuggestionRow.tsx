@@ -2,12 +2,17 @@
 import React from "react";
 import PromptSuggestionButton from "./PromptSuggestionButton";
 
-const PromptSuggestionRow: React.FC<{
+interface PromptSuggestionRowProps {
   prompts: string[];
   onPromptClick: (text: string) => void;
-}> = ({ prompts = [], onPromptClick }) => {
+}
+
+const PromptSuggestionRow: React.FC<PromptSuggestionRowProps> = ({ 
+  prompts = [], 
+  onPromptClick 
+}) => {
   return (
-    <div className="prompt-suggestion-row" role="list">
+    <div className="prompt-suggestion-row" role="list" aria-label="Prompt suggestions">
       {prompts.map((p) => (
         <PromptSuggestionButton key={p} text={p} onClick={onPromptClick} />
       ))}

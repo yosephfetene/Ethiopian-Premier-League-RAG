@@ -1,7 +1,18 @@
-// app/api/route.ts (server)
+// app/api/chat/route.ts
 import { NextResponse } from "next/server";
 import { HfInference } from "@huggingface/inference";
 import { DataAPIClient } from "@datastax/astra-db-ts";
+
+interface AstraDocument {
+  content: string;
+  vector: number[];
+  _id?: any;
+}
+
+interface ChatMessage {
+  content: string;
+  role: 'user' | 'assistant';
+}
 
 const {
   ASTRA_DB_NAMESPACE,
@@ -11,74 +22,192 @@ const {
   HF_TOKEN,
 } = process.env;
 
+// Debug: Check if environment variables are loaded
+console.log('Environment variables check:', {
+  hasHF_TOKEN: !!HF_TOKEN,
+  hasAstraToken: !!ASTRA_DB_APPLICATION_TOKEN,
+  hasAstraEndpoint: !!ASTRA_DB_ENDPOINT,
+  hasAstraCollection: !!ASTRA_DB_COLLECTION
+});
+
 if (!HF_TOKEN) {
-  console.warn("HF_TOKEN is not set in env");
+  console.error("HF_TOKEN is not set in environment variables");
 }
 
 if (!ASTRA_DB_APPLICATION_TOKEN || !ASTRA_DB_ENDPOINT || !ASTRA_DB_COLLECTION) {
-  console.warn("Astra DB environment variables are missing");
+  console.error("Missing Astra DB environment variables");
 }
 
-const hf = new HfInference(HF_TOKEN);
-const astraClient = new DataAPIClient(ASTRA_DB_APPLICATION_TOKEN ?? "");
-// create db handle (matches your LoadDb script usage)
-const db = astraClient.db(ASTRA_DB_ENDPOINT ?? "", { namespace: ASTRA_DB_NAMESPACE });
+// Initialize clients with error handling
+let hf: HfInference;
+let db: any;
 
-export async function POST(req: Request) {
+try {
+  hf = new HfInference(HF_TOKEN);
+  const astraClient = new DataAPIClient(ASTRA_DB_APPLICATION_TOKEN!);
+  db = astraClient.db(ASTRA_DB_ENDPOINT, { namespace: ASTRA_DB_NAMESPACE });
+} catch (error) {
+  console.error("Failed to initialize clients:", error);
+}
+
+const extractVectorFromResponse = (response: any): number[] => {
+  console.log("Extracting vector from response, type:", typeof response);
+  
   try {
+    // If it's already an array of numbers
+    if (Array.isArray(response) && typeof response[0] === 'number') {
+      return response;
+    }
+    
+    // If it's an array of arrays
+    if (Array.isArray(response) && Array.isArray(response[0])) {
+      return response[0];
+    }
+    
+    // If it's an object with data property
+    if (response && typeof response === 'object' && 'data' in response) {
+      const data = response.data;
+      if (Array.isArray(data)) {
+        if (Array.isArray(data[0])) {
+          return data[0];
+        }
+        return data;
+      }
+    }
+    
+    // Try to find any array in the object
+    if (response && typeof response === 'object') {
+      for (const key in response) {
+        if (Array.isArray(response[key]) && response[key].length > 0) {
+          if (typeof response[key][0] === 'number') {
+            return response[key];
+          } else if (Array.isArray(response[key][0])) {
+            return response[key][0];
+          }
+        }
+      }
+    }
+    
+    console.error("Could not extract vector from response:", response);
+    throw new Error("Failed to extract embedding vector");
+  } catch (error) {
+    console.error("Error in extractVectorFromResponse:", error);
+    throw error;
+  }
+};
+
+export async function POST(req: Request): Promise<Response> {
+  try {
+    console.log("Received chat request");
+    
     const body = await req.json();
-    const messages = body.messages ?? [];
-    const latestMessage = messages.length ? messages[messages.length - 1].content : "";
+    console.log("Request body messages length:", body.messages?.length);
+    
+    const messages: ChatMessage[] = body.messages || [];
+    const latestMessage = messages.length > 0 ? messages[messages.length - 1].content : "";
 
-    // create embedding for latest message
-    const embeddingRes = await hf.featureExtraction({
-      model: "sentence-transformers/all-MiniLM-L6-v2",
-      input: latestMessage,
-    });
-
-    const vector = embeddingRes?.data?.[0]?.embedding;
-    if (!vector || !Array.isArray(vector)) {
-      return NextResponse.json({ answer: "Failed to create embedding." }, { status: 500 });
+    if (!latestMessage) {
+      return NextResponse.json({ answer: "No message provided." }, { status: 400 });
     }
 
+    console.log("Processing message:", latestMessage.substring(0, 50) + "...");
+
+    // Create embedding for latest message
+    console.log("Creating embedding...");
+    const embeddingRes = await hf.featureExtraction({
+      model: "sentence-transformers/all-MiniLM-L6-v2",
+      inputs: latestMessage,
+    });
+
+    console.log("Embedding response received");
+    const vector = extractVectorFromResponse(embeddingRes);
+    
+    if (!vector || !Array.isArray(vector) || vector.length === 0) {
+      console.error("Invalid vector generated");
+      return NextResponse.json({ answer: "Failed to create valid embedding." }, { status: 500 });
+    }
+
+    console.log("Vector dimension:", vector.length);
+
     // Query Astra DB collection for nearest neighbors
-    const collection = await db.collection(ASTRA_DB_COLLECTION as string);
-    // The exact query shape depends on Astra SDK; below is a general example using find with vector search.
-    // Adjust fields to match how you stored documents (e.g., content or text).
-    const k = 8;
-    const cursor = await collection.find({
-      $vector: {
-        $vector: vector,
-        $limit: k,
+    console.log("Querying Astra DB...");
+    const collection = await db.collection<AstraDocument>(ASTRA_DB_COLLECTION);
+    const k = 5;
+    
+    const docs = await collection.find({}, {
+      sort: {
+        $vector: vector
+      },
+      limit: k,
+      includeSimilarity: true
+    }).toArray();
+
+    console.log(`Found ${docs.length} relevant documents`);
+
+    const docText = docs.map((d: AstraDocument) => d.content).join("\n---\n");
+    console.log("Context length:", docText.length);
+    
+    const systemPrompt = `You are an expert AI assistant specializing in Ethiopian Premier League football.
+Use the context below from reliable sources to answer the question accurately and helpfully.
+
+CONTEXT:
+${docText}
+
+QUESTION: ${latestMessage}
+
+Please provide a clear, accurate answer based on the context. If the context doesn't contain relevant information, say so politely but still try to help.`;
+
+    console.log("Sending request to Hugging Face for text generation...");
+
+    // Use a simpler, more reliable model
+    const genResponse = await hf.textGeneration({
+      model: "HuggingFaceH4/zephyr-7b-beta", // More reliable model
+      inputs: systemPrompt,
+      parameters: {
+        max_new_tokens: 512,
+        temperature: 0.3,
+        do_sample: true,
+        return_full_text: false,
       },
     });
 
-    const docs = await cursor.toArray();
-    const docText = docs.map((d: any) => d.content ?? d.text ?? "").join("\n---\n");
+    console.log("Received response from Hugging Face");
 
-    const systemPrompt = `
-You are an AI assistant with knowledge of the Ethiopian Premier League.
-Use the context below (recent pages & scraped docs) to answer the QUESTION.
-Context:
-${docText}
+    let answer = genResponse.generated_text.trim();
+    
+    // Clean up the response
+    if (answer.startsWith('Answer:')) {
+      answer = answer.substring(7).trim();
+    }
 
-QUESTION:
-${latestMessage}
-    `;
+    if (!answer) {
+      answer = "I apologize, but I couldn't generate a response. Please try again with a different question.";
+    }
 
-    // Ask HF text-generation endpoint to produce an answer.
-    // NOTE: The HfInference SDK has multiple methods. If you prefer chatCompletion, adapt accordingly.
-    const gen = await hf.textGeneration.create({
-      model = "deepseek-ai/DeepSeek-V2.5", // replace with a chat-ready model you have access to on HF (this is an example)
-      inputs: systemPrompt,
-      max_new_tokens: 256,
-    });
-
-    const answer = Array.isArray(gen) ? gen[0]?.generated_text ?? "" : (gen as any)?.generated_text ?? "";
-
+    console.log("Sending answer back to client");
     return NextResponse.json({ answer });
-  } catch (err) {
-    console.error("API error:", err);
-    return NextResponse.json({ error: "Server error" }, { status: 500 });
+
+  } catch (err: unknown) {
+    console.error("API route error:", err);
+    
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error("Error details:", error.message);
+    console.error("Error stack:", error.stack);
+
+    // Provide user-friendly error messages
+    let userMessage = "Sorry, I encountered an error while processing your request. Please try again.";
+    
+    if (error.message.includes("token") || error.message.includes("auth") || error.message.includes("401")) {
+      userMessage = "Authentication error. Please check the Hugging Face token configuration.";
+    } else if (error.message.includes("rate limit") || error.message.includes("429")) {
+      userMessage = "Rate limit exceeded. Please wait a moment and try again.";
+    } else if (error.message.includes("network") || error.message.includes("fetch")) {
+      userMessage = "Network error. Please check your internet connection and try again.";
+    }
+
+    return NextResponse.json({ 
+      answer: userMessage,
+      error: error.message 
+    }, { status: 500 });
   }
 }
