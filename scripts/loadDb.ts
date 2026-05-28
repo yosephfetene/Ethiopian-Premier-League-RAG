@@ -9,7 +9,7 @@ type SimilarityMetric = "dot_product" | "cosine" | "euclidean";
 
 interface AstraDocument {
   content: string;
-  vector: number[];
+  $vector: number[];
 }
 
 const {
@@ -132,44 +132,49 @@ const scrapePage = async (url: string): Promise<string> => {
   }
 };
 
-const extractVectorFromResponse = (response: any): number[] => {
+const isNumberArray = (value: unknown): value is number[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "number");
+
+const isNumberMatrix = (value: unknown): value is number[][] =>
+  Array.isArray(value) && value.length > 0 && value.every(isNumberArray);
+
+const meanPool = (matrix: number[][]): number[] => {
+  const dimension = matrix[0]?.length ?? 0;
+  if (dimension === 0) return [];
+
+  const totals = new Array(dimension).fill(0);
+  for (const row of matrix) {
+    for (let index = 0; index < dimension; index++) {
+      totals[index] += row[index] ?? 0;
+    }
+  }
+
+  return totals.map((value) => value / matrix.length);
+};
+
+const extractVectorCandidate = (value: unknown): number[] | null => {
+  if (isNumberArray(value)) return value;
+  if (isNumberMatrix(value)) return meanPool(value);
+  if (Array.isArray(value) && value.length > 0) {
+    return extractVectorCandidate(value[0]);
+  }
+  return null;
+};
+
+const extractVectorFromResponse = (response: unknown): number[] => {
   console.log("Raw embedding response type:", typeof response);
-  
-  if (Array.isArray(response)) {
-    // If it's a nested array, take the first element
-    if (Array.isArray(response[0])) {
-      return response[0] as number[];
-    }
-    // If it's a flat array of numbers, return it directly
-    if (response.length > 0 && typeof response[0] === 'number') {
-      return response as number[];
-    }
-  }
-  
-  // Handle object response with data property
-  if (response && typeof response === 'object') {
-    if ('data' in response) {
-      const data = response.data;
-      if (Array.isArray(data)) {
-        if (Array.isArray(data[0])) {
-          return data[0] as number[];
-        }
-        return data as number[];
-      }
-    }
-    // Try to find any array property
-    for (const key in response) {
-      if (Array.isArray(response[key]) && response[key].length > 0) {
-        const arr = response[key];
-        if (Array.isArray(arr[0])) {
-          return arr[0] as number[];
-        } else if (typeof arr[0] === 'number') {
-          return arr as number[];
-        }
-      }
+
+  const directVector = extractVectorCandidate(response);
+  if (directVector) return directVector;
+
+  if (response && typeof response === "object") {
+    const values = Object.values(response as Record<string, unknown>);
+    for (const value of values) {
+      const vector = extractVectorCandidate(value);
+      if (vector) return vector;
     }
   }
-  
+
   console.error("Unexpected embedding response format:", response);
   throw new Error("Failed to extract vector from embedding response");
 };
@@ -202,6 +207,7 @@ const loadSampleData = async (): Promise<void> => {
           () =>
             hf.featureExtraction({
               model: "sentence-transformers/all-MiniLM-L6-v2",
+              provider: "hf-inference",
               inputs: chunk,
             }),
           3,
@@ -222,7 +228,7 @@ const loadSampleData = async (): Promise<void> => {
           () =>
             collection.insertOne({
               content: chunk,
-              vector: safeVector,
+              $vector: safeVector,
             }),
           3,
           1000

@@ -14,6 +14,12 @@ type Message = {
   role: "user" | "assistant";
 };
 
+type ChatApiResponse = {
+  answer?: string;
+};
+
+const REQUEST_TIMEOUT_MS = 45000;
+
 const starterPrompts = [
   "Who won the last Ethiopian Premier League season?",
   "Top goal scorers this season?",
@@ -48,33 +54,38 @@ export default function Home() {
     setInput("");
     setIsLoading(true);
 
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
     try {
-      console.log("Sending request to API...");
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: [...messages, userMsg] }),
+        signal: controller.signal,
       });
 
-      console.log("Response status:", res.status);
-      
-      const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error(data.answer || `HTTP error! status: ${res.status}`);
-      }
-
-      console.log("Response data:", data);
+      const data = (await res.json().catch(() => ({}))) as ChatApiResponse;
+      const answer =
+        data.answer?.trim() ||
+        (res.ok
+          ? "I could not generate a response. Please try again."
+          : `Request failed with status ${res.status}. Please try again.`);
 
       const assistantMsg: Message = {
         id: crypto.randomUUID(),
-        content: data.answer,
+        content: answer,
         role: "assistant",
       };
       append(assistantMsg);
     } catch (err) {
       console.error("Chat error details:", err);
-      const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
+      const errorMessage =
+        err instanceof DOMException && err.name === "AbortError"
+          ? "The request timed out. Please try again."
+          : err instanceof Error
+            ? err.message
+            : "Unknown error occurred";
       
       append({
         id: crypto.randomUUID(),
@@ -82,6 +93,7 @@ export default function Home() {
         role: "assistant",
       });
     } finally {
+      window.clearTimeout(timeout);
       setIsLoading(false);
     }
   };

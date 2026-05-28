@@ -11,52 +11,59 @@ const {
   HF_TOKEN,
 } = process.env;
 
-async function testAllComponents() {
-  console.log("🧪 Testing all components...\n");
+const GENERATION_MODEL =
+  process.env.HF_GENERATION_MODEL ?? "HuggingFaceH4/zephyr-7b-beta";
 
-  // Test 1: Hugging Face connection
+async function testAllComponents() {
+  console.log("Testing all components...\n");
+
   console.log("1. Testing Hugging Face connection...");
   try {
     const hf = new HfInference(HF_TOKEN);
     const embedding = await hf.featureExtraction({
       model: "sentence-transformers/all-MiniLM-L6-v2",
+      provider: "hf-inference",
       inputs: "test query",
     });
-    console.log("✅ Hugging Face embedding works!");
-    
-    // Test text generation
+
+    console.log(
+      `Hugging Face embedding works. Response type: ${
+        Array.isArray(embedding) ? "array" : typeof embedding
+      }`
+    );
+
     const textGen = await hf.textGeneration({
-      model: "HuggingFaceH4/zephyr-7b-beta",
+      model: GENERATION_MODEL,
       inputs: "Hello, how are you?",
-      parameters: { max_new_tokens: 20 }
+      parameters: { max_new_tokens: 20 },
     });
-    console.log("✅ Hugging Face text generation works!");
+
+    console.log("Hugging Face text generation works!");
     console.log(`   Response: ${textGen.generated_text}`);
   } catch (error) {
-    console.log("❌ Hugging Face error:", error instanceof Error ? error.message : error);
+    console.log("Hugging Face error:", error instanceof Error ? error.message : error);
   }
 
-  // Test 2: Astra DB connection
   console.log("\n2. Testing Astra DB connection...");
   try {
     const client = new DataAPIClient(ASTRA_DB_APPLICATION_TOKEN!);
     const db = client.db(ASTRA_DB_ENDPOINT!, { namespace: ASTRA_DB_NAMESPACE });
-    
-    const collections = await db.listCollections();
-    console.log(`✅ Astra DB connection works! Collections: ${collections.join(', ')}`);
-    
+
+    const collections = await db.listCollections({ nameOnly: true });
+    console.log(`Astra DB connection works. Collections: ${collections.join(", ")}`);
+
     if (collections.includes(ASTRA_DB_COLLECTION!)) {
-      const collection = await db.collection(ASTRA_DB_COLLECTION!);
-      const count = await collection.countDocuments();
-      console.log(`✅ Collection '${ASTRA_DB_COLLECTION}' exists with ${count} documents`);
+      const collection = db.collection(ASTRA_DB_COLLECTION!);
+      const count = await collection.countDocuments({}, 1000, { maxTimeMS: 10000 });
+      console.log(`Collection '${ASTRA_DB_COLLECTION}' exists with ${count} documents`);
     } else {
-      console.log(`❌ Collection '${ASTRA_DB_COLLECTION}' does not exist`);
+      console.log(`Collection '${ASTRA_DB_COLLECTION}' does not exist`);
     }
   } catch (error) {
-    console.log("❌ Astra DB error:", error instanceof Error ? error.message : error);
+    console.log("Astra DB error:", error instanceof Error ? error.message : error);
   }
 
-  console.log("\n🎯 Testing complete!");
+  console.log("\nTesting complete!");
 }
 
 testAllComponents().catch(console.error);
